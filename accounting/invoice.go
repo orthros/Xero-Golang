@@ -1,4 +1,15 @@
-package model
+package accounting
+
+import (
+	"encoding/json"
+	"encoding/xml"
+	"strings"
+	"time"
+
+	xero "github.com/TheRegan/Xero-Golang"
+	"github.com/TheRegan/Xero-Golang/helpers"
+	"github.com/markbates/goth"
+)
 
 //Invoice is an Accounts Payable or Accounts Recievable document in a Xero organisation
 type Invoice struct {
@@ -9,13 +20,13 @@ type Invoice struct {
 	Contact Contact `json:"Contact" xml:"Contact"`
 
 	// See LineItems
-	LineItems []LineItem `json:"LineItems>LineItem" xml:"LineItems>LineItem"`
+	LineItems []LineItem `json:"LineItems" xml:"LineItems>LineItem"`
 
 	// Date invoice was issued – YYYY-MM-DD. If the Date element is not specified it will default to the current date based on the timezone setting of the organisation
-	Date string `json:"Date,omitempty" xml:"Date,omitempty"`
+	Date string `json:"DateString,omitempty" xml:"Date,omitempty"`
 
 	// Date invoice is due – YYYY-MM-DD
-	DueDate string `json:"DueDate,omitempty" xml:"DueDate,omitempty"`
+	DueDate string `json:"DueDateString,omitempty" xml:"DueDate,omitempty"`
 
 	// Line amounts are exclusive of tax by default if you don’t specify this element. See Line Amount Types
 	LineAmountTypes string `json:"LineAmountTypes,omitempty" xml:"LineAmountTypes,omitempty"`
@@ -99,4 +110,122 @@ type Invoice struct {
 //Invoices contains a collection of Invoices
 type Invoices struct {
 	Invoices []Invoice `json:"Invoices" xml:"Invoice"`
+}
+
+//The Xero API returns Dates based on the .Net JSON date format available at the time of development
+//We need to convert these to a more usable format - RFC3339 for consistency with what the API expects to recieve
+func (i *Invoices) convertInvoiceDates() error {
+	var err error
+	for n := len(i.Invoices) - 1; n >= 0; n-- {
+		i.Invoices[n].UpdatedDateUTC, err = helpers.DotNetJSONTimeToRFC3339(i.Invoices[n].UpdatedDateUTC, true)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func unmarshalInvoice(invoiceResponseBytes []byte) (*Invoices, error) {
+	var invoiceResponse *Invoices
+	err := json.Unmarshal(invoiceResponseBytes, &invoiceResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	err = invoiceResponse.convertInvoiceDates()
+	if err != nil {
+		return nil, err
+	}
+
+	return invoiceResponse, err
+}
+
+//CreateInvoice will create invoices given an Invoices struct
+func (i *Invoices) CreateInvoice(provider *xero.Provider, session goth.Session) (*Invoices, error) {
+
+	body, err := xml.MarshalIndent(i, "  ", "	")
+	if err != nil {
+		return nil, err
+	}
+
+	invoiceResponseBytes, err := provider.Create(session, "Invoices", body)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalInvoice(invoiceResponseBytes)
+}
+
+//UpdateInvoice will update an invoice given an Invoices struct
+//This will only handle single invoice - you cannot update multiple invoices in a single call
+func (i *Invoices) UpdateInvoice(provider *xero.Provider, session goth.Session) (*Invoices, error) {
+
+	body, err := xml.MarshalIndent(i, "  ", "	")
+	if err != nil {
+		return nil, err
+	}
+
+	invoiceResponseBytes, err := provider.Update(session, "Invoices/"+i.Invoices[0].InvoiceID, body)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalInvoice(invoiceResponseBytes)
+}
+
+//FindAllInvoices will get all invoices
+func FindAllInvoices(provider *xero.Provider, session goth.Session) (*Invoices, error) {
+
+	invoiceResponseBytes, err := provider.Find(session, "Invoices")
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalInvoice(invoiceResponseBytes)
+}
+
+//FindIndividualInvoice will get a single invoice - invoiceID can be a GUID for an invoice or an invoice number
+func FindIndividualInvoice(provider *xero.Provider, session goth.Session, invoiceID string) (*Invoices, error) {
+
+	invoiceResponseBytes, err := provider.Find(session, "Invoices/"+invoiceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalInvoice(invoiceResponseBytes)
+}
+
+//CreateExampleInvoice Creates an Example invoice
+func CreateExampleInvoice() *Invoices {
+	lineItem := LineItem{
+		Description: "Importing & Exporting Services",
+		Quantity:    1.00,
+		UnitAmount:  395.00,
+		AccountCode: "200",
+	}
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	invoice := Invoice{
+		Type: "ACCREC",
+		Contact: Contact{
+			Name: "George Costanza",
+		},
+		Date:            strings.TrimSuffix(today.Format(time.RFC3339), "Z"),
+		DueDate:         strings.TrimSuffix(today.Add(720*time.Hour).Format(time.RFC3339), "Z"),
+		LineAmountTypes: "Exclusive",
+		LineItems:       []LineItem{},
+	}
+
+	invoice.LineItems = append(invoice.LineItems, lineItem)
+
+	invoiceCollection := &Invoices{
+		Invoices: []Invoice{},
+	}
+
+	invoiceCollection.Invoices = append(invoiceCollection.Invoices, invoice)
+
+	return invoiceCollection
 }

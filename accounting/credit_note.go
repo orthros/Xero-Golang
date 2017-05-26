@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //CreditNote an be raised directly against a customer or supplier,
 //allowing the customer or supplier to be held in credit until a future invoice or bill is raised

@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //Organisation is information about a Xero organisation
 type Organisation struct {

@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //LineItem is a line containing detail on an Invoice
 type LineItem struct {

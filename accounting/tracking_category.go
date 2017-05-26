@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //TrackingCategory is used to segment data within a Xero organisation
 type TrackingCategory struct {

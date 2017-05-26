@@ -1,6 +1,4 @@
-package model
-
-import "time"
+package accounting
 
 //Payment details payments against invoices and CreditNotes
 type Payment struct {
@@ -36,7 +34,7 @@ type Payment struct {
 	PaymentType string `json:"PaymentType,omitempty" xml:"PaymentType,omitempty"`
 
 	// UTC timestamp of last update to the payment
-	UpdatedDateUTC time.Time `json:"UpdatedDateUTC,omitempty" xml:"UpdatedDateUTC,omitempty"`
+	UpdatedDateUTC string `json:"UpdatedDateUTC,omitempty" xml:"UpdatedDateUTC,omitempty"`
 
 	// The Xero identifier for an Payment e.g. 297c2dc5-cc47-4afd-8ec8-74990b8761e9
 	PaymentID string `json:"PaymentID,omitempty" xml:"PaymentID,omitempty"`

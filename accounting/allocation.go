@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //Allocation allocated an overpayment or Prepayment to an Invoice
 type Allocation struct {

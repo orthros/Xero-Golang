@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //TrackingOption is an option from within a Tracking category
 type TrackingOption struct {

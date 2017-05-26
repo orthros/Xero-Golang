@@ -1,4 +1,4 @@
-package model
+package accounting
 
 //Account represents individual accounts in a Xero organisation
 type Account struct {

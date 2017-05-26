@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/TheRegan/Xero-Golang/helpers"
-	"github.com/TheRegan/Xero-Golang/model"
-	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 	"github.com/mrjones/oauth"
@@ -37,6 +35,61 @@ var (
 	acceptType = os.Getenv("XERO_ACCEPT_TYPE")
 )
 
+// Provider is the implementation of `goth.Provider` for accessing Xero.
+type Provider struct {
+	ClientKey    string
+	Secret       string
+	CallbackURL  string
+	HTTPClient   *http.Client
+	Method       string
+	debug        bool
+	consumer     *oauth.Consumer
+	providerName string
+}
+
+//newPublicConsumer creates a consumer capable of communicating with a Public application: https://developer.xero.com/documentation/auth-and-limits/public-applications
+func (p *Provider) newPublicConsumer(authURL string) *oauth.Consumer {
+	c := oauth.NewConsumer(
+		p.ClientKey,
+		p.Secret,
+		oauth.ServiceProvider{
+			RequestTokenUrl:   requestURL,
+			AuthorizeTokenUrl: authURL,
+			AccessTokenUrl:    tokenURL},
+	)
+
+	c.Debug(p.debug)
+
+	return c
+}
+
+//newPartnerConsumer creates a consumer capable of communicating with a Partner application: https://developer.xero.com/documentation/auth-and-limits/partner-applications
+func (p *Provider) newPrivateOrPartnerConsumer(authURL string) *oauth.Consumer {
+	privateKeyFileContents, err := ioutil.ReadFile(privateKeyFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	block, _ := pem.Decode([]byte(privateKeyFileContents))
+
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	c := oauth.NewRSAConsumer(
+		p.ClientKey,
+		privateKey,
+		oauth.ServiceProvider{
+			RequestTokenUrl:   requestURL,
+			AuthorizeTokenUrl: authURL,
+			AccessTokenUrl:    tokenURL},
+	)
+
+	c.Debug(p.debug)
+
+	return c
+}
+
 // New creates a new Xero provider, and sets up important connection details.
 // You should always call `xero.New` to get a new Provider. Never try to create
 // one manually.
@@ -55,27 +108,15 @@ func New(clientKey, secret, callbackURL string) *Provider {
 
 	switch p.Method {
 	case "private":
-		p.consumer = newPrivateOrPartnerConsumer(p, authorizeURL)
+		p.consumer = p.newPrivateOrPartnerConsumer(authorizeURL)
 	case "public":
-		p.consumer = newPublicConsumer(p, authorizeURL)
+		p.consumer = p.newPublicConsumer(authorizeURL)
 	case "partner":
-		p.consumer = newPrivateOrPartnerConsumer(p, authorizeURL)
+		p.consumer = p.newPrivateOrPartnerConsumer(authorizeURL)
 	default:
-		p.consumer = newPublicConsumer(p, authorizeURL)
+		p.consumer = p.newPublicConsumer(authorizeURL)
 	}
 	return p
-}
-
-// Provider is the implementation of `goth.Provider` for accessing Xero.
-type Provider struct {
-	ClientKey    string
-	Secret       string
-	CallbackURL  string
-	HTTPClient   *http.Client
-	Method       string
-	debug        bool
-	consumer     *oauth.Consumer
-	providerName string
 }
 
 // Name is the name used to retrieve this provider later.
@@ -126,19 +167,21 @@ func (p *Provider) BeginAuth(state string) (goth.Session, error) {
 }
 
 //ProcessRequest processes a request prior to it being sent to the API
-func (p *Provider) ProcessRequest(request *http.Request, session *Session) ([]byte, error) {
+func (p *Provider) ProcessRequest(request *http.Request, session goth.Session) ([]byte, error) {
+	sess := session.(*Session)
+
+	if sess.AccessToken == nil {
+		// data is not yet retrieved since accessToken is still empty
+		return nil, fmt.Errorf("%s cannot process request without accessToken", p.providerName)
+	}
 	request.Header.Add("Accept", acceptType)
 	request.Header.Add("User-Agent", userAgentString)
 	//We have to PUT and POST using XML so we specify the content type here.
-	//Ideally this should be x-www-form-urlencoded but mrjones/oAuth library
-	//will strip our request body when it uses RSA-SHA1 signing if we specify
-	// that content type so we can't use it with Partner or private applications.
-	//application/xml still works and still appears in Xero's logs
 	if request.Method == "PUT" || request.Method == "POST" {
 		request.Header.Add("Content-Type", "application/xml")
 	}
 
-	client, err := p.consumer.MakeHttpClient(session.AccessToken)
+	client, err := p.consumer.MakeHttpClient(sess.AccessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +213,74 @@ func (p *Provider) ProcessRequest(request *http.Request, session *Session) ([]by
 	return responseBytes, nil
 }
 
+//Find retrieves the requested data from an endpoint to be unmarshaled into the appropriate data type
+func (p *Provider) Find(session goth.Session, endpoint string) ([]byte, error) {
+	request, err := http.NewRequest("GET", endpointProfile+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.ProcessRequest(request, session)
+}
+
+//Create sends data to an endpoint and returns a response to be unmarshaled into the appropriate data type
+func (p *Provider) Create(session goth.Session, endpoint string, body []byte) ([]byte, error) {
+	bodyReader := bytes.NewReader(body)
+
+	request, err := http.NewRequest("PUT", endpointProfile+endpoint, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.ProcessRequest(request, session)
+}
+
+//Update sends data to an endpoint and returns a response to be unmarshaled into the appropriate data type
+func (p *Provider) Update(session goth.Session, endpoint string, body []byte) ([]byte, error) {
+	bodyReader := bytes.NewReader(body)
+
+	request, err := http.NewRequest("POST", endpointProfile+endpoint, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.ProcessRequest(request, session)
+}
+
+//Remove deletes the specified data from an endpoint
+func (p *Provider) Remove(session goth.Session, endpoint string) ([]byte, error) {
+	request, err := http.NewRequest("DELETE", endpointProfile+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.ProcessRequest(request, session)
+}
+
+//Organisation is the expected response from the Organisation endpoint - this is not a complete schema
+//and should only be used by FetchUser
+type Organisation struct {
+	// Display name of organisation shown in Xero
+	Name string `json:"Name,omitempty"`
+
+	// Organisation name shown on Reports
+	LegalName string `json:"LegalName,omitempty"`
+
+	// Organisation Type
+	OrganisationType string `json:"OrganisationType,omitempty"`
+
+	// Country code for organisation. See ISO 3166-2 Country Codes
+	CountryCode string `json:"CountryCode,omitempty"`
+
+	// A unique identifier for the organisation.
+	ShortCode string `json:"ShortCode,omitempty"`
+}
+
+//OrganisationCollection is the Total response from the Xero API
+type OrganisationCollection struct {
+	Organisations []Organisation `json:"Organisations,omitempty"`
+}
+
 // FetchUser will go to Xero and access basic information about the user.
 func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 	sess := session.(*Session)
@@ -181,7 +292,7 @@ func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 	if err != nil {
 		return user, err
 	}
-	var organisationCollection model.OrganisationCollection
+	var organisationCollection OrganisationCollection
 	err = json.Unmarshal(responseBytes, &organisationCollection)
 	if err != nil {
 		return user, fmt.Errorf("Could not unmarshal response: %s", err.Error())
@@ -198,121 +309,6 @@ func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 	user.ExpiresAt = sess.AccessTokenExpires
 	user.Email = p.Method
 	return user, err
-}
-
-//Find retrieves the requested data from an endpoint to be unmarshaled into the appropriate data type
-func (p *Provider) Find(session goth.Session, endpoint string) ([]byte, error) {
-	sess := session.(*Session)
-
-	if sess.AccessToken == nil {
-		// data is not yet retrieved since accessToken is still empty
-		return nil, fmt.Errorf("%s cannot find information without accessToken", p.providerName)
-	}
-
-	request, err := http.NewRequest("GET", endpointProfile+endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.ProcessRequest(request, sess)
-}
-
-//Create sends data to an endpoint and returns a response to be unmarshaled into the appropriate data type
-func (p *Provider) Create(session goth.Session, endpoint string, body []byte) ([]byte, error) {
-	sess := session.(*Session)
-
-	if sess.AccessToken == nil {
-		// data is not yet retrieved since accessToken is still empty
-		return nil, fmt.Errorf("%s cannot create anything without accessToken", p.providerName)
-	}
-
-	bodyReader := bytes.NewReader(body)
-
-	request, err := http.NewRequest("PUT", endpointProfile+endpoint, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.ProcessRequest(request, sess)
-}
-
-//Update sends data to an endpoint and returns a response to be unmarshaled into the appropriate data type
-func (p *Provider) Update(session goth.Session, endpoint string, body []byte) ([]byte, error) {
-	sess := session.(*Session)
-
-	if sess.AccessToken == nil {
-		// data is not yet retrieved since accessToken is still empty
-		return nil, fmt.Errorf("%s cannot update anything without accessToken", p.providerName)
-	}
-
-	bodyReader := bytes.NewReader(body)
-
-	request, err := http.NewRequest("POST", endpointProfile+endpoint, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.ProcessRequest(request, sess)
-}
-
-//Remove deletes the specified data from an endpoint
-func (p *Provider) Remove(session goth.Session, endpoint string) ([]byte, error) {
-	sess := session.(*Session)
-
-	if sess.AccessToken == nil {
-		// data is not yet retrieved since accessToken is still empty
-		return nil, fmt.Errorf("%s cannot remove anything without accessToken", p.providerName)
-	}
-
-	request, err := http.NewRequest("DELETE", endpointProfile+endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return p.ProcessRequest(request, sess)
-}
-
-//newPublicConsumer creates a consumer capable of communicating with a Public application: https://developer.xero.com/documentation/auth-and-limits/public-applications
-func newPublicConsumer(provider *Provider, authURL string) *oauth.Consumer {
-	c := oauth.NewConsumer(
-		provider.ClientKey,
-		provider.Secret,
-		oauth.ServiceProvider{
-			RequestTokenUrl:   requestURL,
-			AuthorizeTokenUrl: authURL,
-			AccessTokenUrl:    tokenURL},
-	)
-
-	c.Debug(provider.debug)
-
-	return c
-}
-
-//newPartnerConsumer creates a consumer capable of communicating with a Partner application: https://developer.xero.com/documentation/auth-and-limits/partner-applications
-func newPrivateOrPartnerConsumer(provider *Provider, authURL string) *oauth.Consumer {
-	privateKeyFileContents, err := ioutil.ReadFile(privateKeyFilePath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	block, _ := pem.Decode([]byte(privateKeyFileContents))
-
-	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		log.Fatal(err)
-	}
-	c := oauth.NewRSAConsumer(
-		provider.ClientKey,
-		privateKey,
-		oauth.ServiceProvider{
-			RequestTokenUrl:   requestURL,
-			AuthorizeTokenUrl: authURL,
-			AccessTokenUrl:    tokenURL},
-	)
-
-	c.Debug(provider.debug)
-
-	return c
 }
 
 //RefreshOAuth1Token should be used instead of RefeshToken which is not compliant with the Oauth1.0a standard
@@ -338,13 +334,30 @@ func (p *Provider) RefreshTokenAvailable() bool {
 	return false
 }
 
-//GetSessionFromStore returns a session for a given store, provider, and request
-func (p *Provider) GetSessionFromStore(request *http.Request, store sessions.Store) (goth.Session, error) {
-	sessionMarshalled, _ := store.Get(request, "xero"+gothic.SessionName)
+//GetSessionFromStore returns a session for a given a request and a response
+//This is an exaple of how you could get a session from a store - as long as you're
+//supplying a goth.Session to the interactors it will work though so feel free to use your
+//own method
+func (p *Provider) GetSessionFromStore(request *http.Request, response http.ResponseWriter) (goth.Session, error) {
+	sessionMarshalled, _ := gothic.Store.Get(request, "xero"+gothic.SessionName)
 	value := sessionMarshalled.Values["xero"]
 	if value == nil {
 		return nil, errors.New("could not find a matching session for this request")
 	}
-
-	return p.UnmarshalSession(value.(string))
+	session, err := p.UnmarshalSession(value.(string))
+	if err != nil {
+		return nil, errors.New("could not unmarshal session for this request")
+	}
+	sess := session.(*Session)
+	if sess.AccessTokenExpires.Before(time.Now().UTC().Add(5 * time.Minute)) {
+		if p.Method == "partner" {
+			p.RefreshOAuth1Token(sess)
+			sessionMarshalled.Values["xero"] = sess.Marshal()
+			err = sessionMarshalled.Save(request, response)
+			return session, err
+		} else {
+			return nil, errors.New("access token has expired - please reconnect")
+		}
+	}
+	return session, err
 }
